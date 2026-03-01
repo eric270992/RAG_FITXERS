@@ -1,34 +1,44 @@
 ﻿// 1. Setup
+using Microsoft.Extensions.AI;
+using Microsoft.Extensions.Configuration;
 using Microsoft.SemanticKernel;
+using Microsoft.SemanticKernel.Connectors.Google;
 using Microsoft.SemanticKernel.Embeddings;
 using Microsoft.SemanticKernel.Text;
-using Microsoft.SemanticKernel.Connectors.Google;
 using RAG_FITXERS;
 using RAG_FITXERS.Services;
 using RAG_FITXERS.Utils;
 
 var builder = Kernel.CreateBuilder();
 
+// 1. Carregar la configuració des del fitxer
+IConfiguration config = new ConfigurationBuilder()
+    .SetBasePath(Directory.GetCurrentDirectory()) // On es troba l'executable
+    .AddJsonFile("configs.json", optional: false, reloadOnChange: true)
+    .Build();
+
 // Groq per a chat (compatible amb OpenAI)
 builder.AddOpenAIChatCompletion(
     modelId: "llama3-8b-8192",
-    apiKey: Environment.GetEnvironmentVariable("GROQ_KEY") ?? "LA_TEVA_CLAU",
-    endpoint: new Uri("https://api.groq.com/openai/v1")
+    apiKey: config["Keys:Groq"],
+    endpoint: new Uri("https://api.groq.com/openai/v1"),
+    serviceId: "groq"
 );
 
 // Gemini per a embeddings
 builder.AddGoogleAIEmbeddingGenerator(
-    modelId: "text-embedding-004",
-    apiKey: Environment.GetEnvironmentVariable("GEMINI_KEY") ?? "LA_TEVA_CLAU"
+    modelId: "gemini-embedding-001",
+    apiKey: config["Keys:Gemini"],
+    serviceId: "gemini"
 );
 
 var kernel = builder.Build();
 
-var db = new DatabaseService("Host=localhost;Username=postgres;Password=pass;Database=rag_db");
+var db = new DatabaseService(config["ConnectionStrings:DefaultConnection"]);
 var orchestrator = new RagOrchestrator(kernel, db);
 
 // 2. Ingestió
-string folder = @"C:\Dades";
+string folder = config["Folders:PathToFiles"];
 
 foreach (var path in Directory.GetFiles(folder, "*.*"))
 {
@@ -38,19 +48,19 @@ foreach (var path in Directory.GetFiles(folder, "*.*"))
     int docId = await db.RegisterDocumentAsync(Path.GetFileName(path), path, hash);
     string text = await FileUtils.ExtractAsync(path);
 
-    // SplitPlainTextLines retorna IEnumerable<string>, cal .ToList()
     var lines = TextChunker.SplitPlainTextLines(text, 500).ToList();
     var chunks = TextChunker.SplitPlainTextParagraphs(lines, 500, 50);
 
-    var embeddingService = kernel.GetRequiredService<ITextEmbeddingGenerationService>();
+    var embeddingService = kernel.GetRequiredService<IEmbeddingGenerator<string, Embedding<float>>>();
 
     for (int i = 0; i < chunks.Count; i++)
     {
         string searchable = $"[Doc: {Path.GetFileName(path)}] {chunks[i]}";
 
-        // GenerateEmbeddingAsync retorna ReadOnlyMemory<float>, no cal .ToArray() directament
-        ReadOnlyMemory<float> vec = await embeddingService.GenerateEmbeddingAsync(searchable);
-        await db.SaveChunkAsync(docId, i, chunks[i], vec.ToArray());
+        var result = await embeddingService.GenerateAsync(new[] { searchable });
+        float[] vec = result[0].Vector.ToArray();
+
+        await db.SaveChunkAsync(docId, i, chunks[i], vec);
     }
 }
 

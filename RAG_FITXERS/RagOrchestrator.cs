@@ -1,4 +1,5 @@
-﻿using Microsoft.SemanticKernel;
+﻿using Microsoft.Extensions.AI;
+using Microsoft.SemanticKernel;
 using Microsoft.SemanticKernel.ChatCompletion;
 using Microsoft.SemanticKernel.Embeddings;
 using RAG_FITXERS.Models;
@@ -13,21 +14,23 @@ namespace RAG_FITXERS
     public class RagOrchestrator
     {
         private readonly IChatCompletionService _groq;
-        private readonly ITextEmbeddingGenerationService _gemini;
+        private readonly IEmbeddingGenerator<string, Embedding<float>> _gemini;
         private readonly DatabaseService _db;
 
         public RagOrchestrator(Kernel kernel, DatabaseService db)
         {
-            _groq = kernel.GetRequiredService<IChatCompletionService>();
-            _gemini = kernel.GetRequiredService<ITextEmbeddingGenerationService>();
+            _groq = kernel.GetRequiredService<IChatCompletionService>("groq");
+            _gemini = kernel.GetRequiredService<IEmbeddingGenerator<string, Embedding<float>>>();
             _db = db;
         }
 
         public async Task<string> ProcessQueryAsync(string question)
         {
-            var embedding = await _gemini.GenerateEmbeddingAsync(question);
-            string context = await _db.GetContextWindowAsync(embedding.ToArray());
+            // IEmbeddingGenerator retorna una llista d'Embedding<float>
+            var embeddingResult = await _gemini.GenerateAsync(new[] { question });
+            float[] embeddingVec = embeddingResult[0].Vector.ToArray();
 
+            string context = await _db.GetContextWindowAsync(embeddingVec);
             string answer = "";
             int attempts = 0;
             int score = 0;
@@ -37,13 +40,13 @@ namespace RAG_FITXERS
                 answer = await GenerateAsync(question, context);
                 var judgeRes = await JudgeAsync(question, context, answer);
                 score = judgeRes.Score;
-
                 if (score < 80)
                 {
                     Console.WriteLine($"[JUDGE] Score {score}: {judgeRes.Reason}. Reintentant...");
                     attempts++;
                 }
             }
+
             return answer;
         }
 
