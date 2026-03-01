@@ -3,7 +3,6 @@ using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Configuration;
 using Microsoft.SemanticKernel;
 using Microsoft.SemanticKernel.Connectors.Google;
-using Microsoft.SemanticKernel.Embeddings;
 using Microsoft.SemanticKernel.Text;
 using RAG_FITXERS;
 using RAG_FITXERS.Services;
@@ -11,15 +10,15 @@ using RAG_FITXERS.Utils;
 
 var builder = Kernel.CreateBuilder();
 
-// 1. Carregar la configuració des del fitxer
+// Carregar la configuració des del fitxer
 IConfiguration config = new ConfigurationBuilder()
-    .SetBasePath(Directory.GetCurrentDirectory()) // On es troba l'executable
+    .SetBasePath(Directory.GetCurrentDirectory())
     .AddJsonFile("configs.json", optional: false, reloadOnChange: true)
     .Build();
 
 // Groq per a chat (compatible amb OpenAI)
 builder.AddOpenAIChatCompletion(
-    modelId: "llama3-8b-8192",
+    modelId: "llama-3.3-70b-versatile",
     apiKey: config["Keys:Groq"],
     endpoint: new Uri("https://api.groq.com/openai/v1"),
     serviceId: "groq"
@@ -33,39 +32,58 @@ builder.AddGoogleAIEmbeddingGenerator(
 );
 
 var kernel = builder.Build();
-
 var db = new DatabaseService(config["ConnectionStrings:DefaultConnection"]);
 var orchestrator = new RagOrchestrator(kernel, db);
+var embeddingService = kernel.GetRequiredService<IEmbeddingGenerator<string, Embedding<float>>>();
 
 // 2. Ingestió
 string folder = config["Folders:PathToFiles"];
 
 foreach (var path in Directory.GetFiles(folder, "*.*"))
 {
+    string fileName = Path.GetFileName(path);
     string hash = FileUtils.CalculateHash(path);
-    if (await db.GetIdByHashAsync(hash) != null) continue;
 
-    int docId = await db.RegisterDocumentAsync(Path.GetFileName(path), path, hash);
-    string text = await FileUtils.ExtractAsync(path);
-
-    var lines = TextChunker.SplitPlainTextLines(text, 500).ToList();
-    var chunks = TextChunker.SplitPlainTextParagraphs(lines, 500, 50);
-
-    var embeddingService = kernel.GetRequiredService<IEmbeddingGenerator<string, Embedding<float>>>();
-
-    for (int i = 0; i < chunks.Count; i++)
+    if (await db.GetIdByHashAsync(hash) != null)
     {
-        string searchable = $"[Doc: {Path.GetFileName(path)}] {chunks[i]}";
+        Console.WriteLine($"[SKIP] '{fileName}' ja processat.");
+        continue;
+    }
 
-        var result = await embeddingService.GenerateAsync(new[] { searchable });
-        float[] vec = result[0].Vector.ToArray();
+    Console.WriteLine($"[INFO] Processant '{fileName}'...");
 
-        await db.SaveChunkAsync(docId, i, chunks[i], vec);
+    try
+    {
+        string text = await FileUtils.ExtractAsync(path);
+        var lines = TextChunker.SplitPlainTextLines(text, 500).ToList();
+        var rawChunks = TextChunker.SplitPlainTextParagraphs(lines, 500, 50);
+
+        // Generem tots els embeddings ABANS de tocar la BD.
+        // Així si falla Gemini a meitat, no hem escrit res a la BD
+        // i el document es podrà tornar a processar íntegrament.
+        Console.WriteLine($"[INFO] Generant embeddings per {rawChunks.Count} chunks...");
+        var chunksAmbEmbeddings = new List<(string Content, float[] Embedding)>();
+
+        foreach (var chunk in rawChunks)
+        {
+            string searchable = $"[Doc: {fileName}] {chunk}";
+            var result = await embeddingService.GenerateAsync(new[] { searchable });
+            chunksAmbEmbeddings.Add((chunk, result[0].Vector.ToArray()));
+        }
+
+        // Guardem document + chunks en una sola transacció atòmica.
+        // Si falla qualsevol INSERT → ROLLBACK complet.
+        await db.RegisterDocumentWithChunksAsync(fileName, path, hash, chunksAmbEmbeddings);
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"[ERROR] Error processant '{fileName}': {ex.Message}");
+        Console.WriteLine($"        El document es tornarà a processar en la propera execució.");
     }
 }
 
 // 3. Xat
-Console.WriteLine("Digues:");
+Console.WriteLine("\nDigues:");
 string? q = Console.ReadLine();
 
 if (!string.IsNullOrWhiteSpace(q))

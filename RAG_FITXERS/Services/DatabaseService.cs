@@ -32,7 +32,7 @@ namespace RAG_FITXERS.Services
         public DatabaseService(string connStr)
         {
             var builder = new NpgsqlDataSourceBuilder(connStr);
-            builder.UseVector(); // Habilita la conversió automàtica entre float[] i el tipus VECTOR de pgvector
+            builder.UseVector();
             _dataSource = builder.Build();
         }
 
@@ -54,66 +54,86 @@ namespace RAG_FITXERS.Services
         }
 
         /// <summary>
-        /// Registra un nou document a la base de dades.
+        /// Registra un document i tots els seus chunks de forma atòmica dins d'una transacció.
         /// 
-        /// Primer elimina qualsevol versió anterior del mateix fitxer (per nom) per evitar
-        /// duplicats en cas de re-ingestió d'un document actualitzat. Després insereix
-        /// el nou registre i retorna l'ID generat, que s'usarà per associar els chunks.
+        /// PER QUÈ UNA TRANSACCIÓ?
+        /// La ingestió d'un document és un procés de dos passos:
+        ///   1. Inserir el document a la taula Documents
+        ///   2. Inserir N chunks amb els seus embeddings a DocumentChunks
+        /// 
+        /// Si el procés falla a meitat (per exemple, error de xarxa cridant Gemini al chunk 5 de 20),
+        /// sense transacció quedaríem amb un document registrat però amb chunks incomplets,
+        /// cosa que donaria resultats incorrectes en les cerques vectorials.
+        /// 
+        /// Amb la transacció, si qualsevol pas falla → ROLLBACK complet → com si no hagués passat res.
+        /// El document es podrà tornar a processar íntegrament en la propera execució.
+        /// 
+        /// FLUX:
+        ///   BEGIN
+        ///     DELETE document anterior (si existia)
+        ///     INSERT document → obté docId
+        ///     INSERT chunk 0 amb embedding
+        ///     INSERT chunk 1 amb embedding
+        ///     ...
+        ///     INSERT chunk N amb embedding
+        ///   COMMIT  ← només si tot ha anat bé
+        ///   ROLLBACK ← si qualsevol pas falla
         /// </summary>
-        /// <returns>L'ID autogenerat del document inserit.</returns>
-        public async Task<int> RegisterDocumentAsync(string name, string path, string hash)
+        public async Task<int?> RegisterDocumentWithChunksAsync(
+            string name, string path, string hash, List<(string Content, float[] Embedding)> chunks)
         {
             using var conn = await _dataSource.OpenConnectionAsync();
+            await using var tx = await conn.BeginTransactionAsync();
 
-            // Elimina la versió anterior del document si existia (re-ingestió)
-            using (var del = new NpgsqlCommand("DELETE FROM Documents WHERE FileName = @n", conn))
+            try
             {
-                del.Parameters.AddWithValue("n", name);
-                await del.ExecuteNonQueryAsync();
+                // PAS 1: Elimina versió anterior del document (re-ingestió)
+                using (var del = new NpgsqlCommand("DELETE FROM Documents WHERE FileName = @n", conn, tx))
+                {
+                    del.Parameters.AddWithValue("n", name);
+                    await del.ExecuteNonQueryAsync();
+                }
+
+                // PAS 2: Insereix el document i obté l'ID generat
+                int docId;
+                using (var cmd = new NpgsqlCommand(
+                    "INSERT INTO Documents (FileName, FilePath, FileHash) VALUES (@n, @p, @h) RETURNING Id", conn, tx))
+                {
+                    cmd.Parameters.AddWithValue("n", name);
+                    cmd.Parameters.AddWithValue("p", path);
+                    cmd.Parameters.AddWithValue("h", hash);
+                    docId = (int)await cmd.ExecuteScalarAsync();
+                }
+
+                // PAS 3: Insereix tots els chunks amb els seus embeddings
+                for (int i = 0; i < chunks.Count; i++)
+                {
+                    var (content, vec) = chunks[i];
+                    var vector = new Pgvector.Vector(vec);
+
+                    using var cmd = new NpgsqlCommand(
+                        "INSERT INTO DocumentChunks (DocumentId, ChunkIndex, RawContent, Embedding) VALUES (@d, @i, @c, @v)",
+                        conn, tx);
+                    cmd.Parameters.AddWithValue("d", docId);
+                    cmd.Parameters.AddWithValue("i", i);
+                    cmd.Parameters.AddWithValue("c", content);
+                    cmd.Parameters.AddWithValue("v", vector);
+                    await cmd.ExecuteNonQueryAsync();
+                }
+
+                // Tot ha anat bé → confirmem els canvis
+                await tx.CommitAsync();
+                Console.WriteLine($"[DB] Document '{name}' guardat correctament ({chunks.Count} chunks).");
+                return docId;
             }
-
-            // RETURNING Id retorna directament l'ID generat per SERIAL sense fer un SELECT addicional
-            using var cmd = new NpgsqlCommand(
-                "INSERT INTO Documents (FileName, FilePath, FileHash) VALUES (@n, @p, @h) RETURNING Id", conn);
-            cmd.Parameters.AddWithValue("n", name);
-            cmd.Parameters.AddWithValue("p", path);
-            cmd.Parameters.AddWithValue("h", hash);
-            return (int)await cmd.ExecuteScalarAsync();
-        }
-
-        /// <summary>
-        /// Desa un fragment (chunk) de document juntament amb el seu embedding vectorial.
-        /// 
-        /// QUÈ ÉS UN CHUNK?
-        /// Els documents es divideixen en fragments petits (chunks) perquè:
-        ///   - Els LLMs tenen una finestra de context limitada
-        ///   - La cerca vectorial funciona millor amb fragments petits i concrets
-        ///   - Permet recuperar només la part rellevant, no tot el document
-        /// 
-        /// QUÈ ÉS UN EMBEDDING?
-        /// Un embedding és una representació numèrica del significat semàntic d'un text,
-        /// expressada com un vector de N dimensions (en aquest cas 3072 amb gemini-embedding-001).
-        /// Texts amb significat similar tindran vectors similars (pròxims en l'espai vectorial).
-        /// 
-        /// Exemple visual (simplificat a 2D):
-        ///   "El gat menja"     → [0.9, 0.1]
-        ///   "El felí s'alimenta" → [0.85, 0.12]  ← molt pròxim, semànticament similar
-        ///   "La borsa puja"    → [0.1, 0.95]     ← llunyà, semànticament diferent
-        /// </summary>
-        public async Task SaveChunkAsync(int docId, int index, string content, float[] vec)
-        {
-            using var conn = await _dataSource.OpenConnectionAsync();
-
-            // Convertim float[] a Vector, el tipus que entén pgvector
-            var vector = new Pgvector.Vector(vec);
-
-            using var cmd = new NpgsqlCommand(
-                "INSERT INTO DocumentChunks (DocumentId, ChunkIndex, RawContent, Embedding) VALUES (@d, @i, @c, @v)", conn);
-            cmd.Parameters.AddWithValue("d", docId);
-            cmd.Parameters.AddWithValue("i", index);
-            cmd.Parameters.AddWithValue("c", content); // Text original llegible per humans
-            cmd.Parameters.AddWithValue("v", vector);  // Vector per a cerca semàntica
-            await cmd.ExecuteNonQueryAsync();
+            catch (Exception ex)
+            {
+                // Qualsevol error → desfem tots els canvis, com si no hagués passat res
+                await tx.RollbackAsync();
+                Console.WriteLine($"[ERROR] No s'ha pogut guardar '{name}': {ex.Message}");
+                Console.WriteLine($"        El document es tornarà a processar en la propera execució.");
+                return null;
+            }
         }
 
         /// <summary>
@@ -157,13 +177,12 @@ namespace RAG_FITXERS.Services
             {
                 cmd.Parameters.AddWithValue("v", vector);
                 using var r = await cmd.ExecuteReaderAsync();
-                if (!await r.ReadAsync()) return ""; // Cap document ingerit encara
+                if (!await r.ReadAsync()) return "";
                 docId = r.GetInt32(0);
-                centerIdx = r.GetInt32(1); // Índex del chunk central trobat
+                centerIdx = r.GetInt32(1);
             }
 
             // PAS 2: Windowing — recupera el chunk trobat i els seus veïns immediats
-            // BETWEEN @min AND @max selecciona: chunk anterior, central i posterior
             var sb = new StringBuilder();
             using (var cmd = new NpgsqlCommand(
                 @"SELECT RawContent FROM DocumentChunks 
@@ -171,15 +190,13 @@ namespace RAG_FITXERS.Services
                   ORDER BY ChunkIndex", conn))
             {
                 cmd.Parameters.AddWithValue("d", docId);
-                cmd.Parameters.AddWithValue("min", centerIdx - 1); // Chunk anterior
-                cmd.Parameters.AddWithValue("max", centerIdx + 1); // Chunk posterior
+                cmd.Parameters.AddWithValue("min", centerIdx - 1);
+                cmd.Parameters.AddWithValue("max", centerIdx + 1);
                 using var r = await cmd.ExecuteReaderAsync();
-
-                // Concatenem els chunks en ordre per formar un context coherent
                 while (await r.ReadAsync()) sb.AppendLine(r.GetString(0));
             }
 
-            return sb.ToString(); // Aquest text s'injectarà al prompt del LLM com a context
+            return sb.ToString();
         }
     }
 }
