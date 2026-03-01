@@ -26,23 +26,31 @@ namespace RAG_FITXERS
 
         public async Task<string> ProcessQueryAsync(string question)
         {
-            // IEmbeddingGenerator retorna una llista d'Embedding<float>
             var embeddingResult = await _gemini.GenerateAsync(new[] { question });
             float[] embeddingVec = embeddingResult[0].Vector.ToArray();
 
-            string context = await _db.GetContextWindowAsync(embeddingVec);
             string answer = "";
             int attempts = 0;
             int score = 0;
 
-            while (score < 80 && attempts < 2)
+            // Cada reintent amplia la finestra de context:
+            // Intent 0 → windowSize 1 → 3 chunks
+            // Intent 1 → windowSize 2 → 5 chunks
+            // Intent 2 → windowSize 3 → 7 chunks
+            while (score < 80 && attempts <= 2)
             {
+                int windowSize = attempts + 1;
+                string context = await _db.GetContextWindowAsync(embeddingVec, windowSize);
+
+                Console.WriteLine($"[RAG] Intent {attempts + 1} amb finestra de {windowSize * 2 + 1} chunks...");
+
                 answer = await GenerateAsync(question, context);
                 var judgeRes = await JudgeAsync(question, context, answer);
                 score = judgeRes.Score;
+
                 if (score < 80)
                 {
-                    Console.WriteLine($"[JUDGE] Score {score}: {judgeRes.Reason}. Reintentant...");
+                    Console.WriteLine($"[JUDGE] Score {score}/100: {judgeRes.Reason}. Ampliant context...");
                     attempts++;
                 }
             }

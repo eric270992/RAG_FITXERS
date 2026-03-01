@@ -164,13 +164,17 @@ namespace RAG_FITXERS.Services
         /// </summary>
         /// <param name="queryVector">L'embedding de la pregunta de l'usuari (3072 dimensions).</param>
         /// <returns>Text concatenat dels chunks més rellevants per usar com a context del LLM.</returns>
-        public async Task<string> GetContextWindowAsync(float[] queryVector)
+        /// <param name="windowSize">
+        /// Nombre de chunks veïns a cada costat del chunk central.
+        /// windowSize=1 → 3 chunks (N-1, N, N+1)
+        /// windowSize=2 → 5 chunks (N-2, N-1, N, N+1, N+2)
+        /// windowSize=3 → 7 chunks (N-3...N+3)
+        /// </param>
+        public async Task<string> GetContextWindowAsync(float[] queryVector, int windowSize = 1)
         {
             using var conn = await _dataSource.OpenConnectionAsync();
             var vector = new Pgvector.Vector(queryVector);
 
-            // PAS 1: Cerca vectorial — troba el chunk semànticament més proper a la pregunta
-            // L'operador <=> és la distància cosinus, proporcionada per pgvector
             int docId, centerIdx;
             using (var cmd = new NpgsqlCommand(
                 "SELECT DocumentId, ChunkIndex FROM DocumentChunks ORDER BY Embedding <=> @v LIMIT 1", conn))
@@ -182,16 +186,15 @@ namespace RAG_FITXERS.Services
                 centerIdx = r.GetInt32(1);
             }
 
-            // PAS 2: Windowing — recupera el chunk trobat i els seus veïns immediats
             var sb = new StringBuilder();
             using (var cmd = new NpgsqlCommand(
                 @"SELECT RawContent FROM DocumentChunks 
-                  WHERE DocumentId = @d AND ChunkIndex BETWEEN @min AND @max 
-                  ORDER BY ChunkIndex", conn))
+          WHERE DocumentId = @d AND ChunkIndex BETWEEN @min AND @max 
+          ORDER BY ChunkIndex", conn))
             {
                 cmd.Parameters.AddWithValue("d", docId);
-                cmd.Parameters.AddWithValue("min", centerIdx - 1);
-                cmd.Parameters.AddWithValue("max", centerIdx + 1);
+                cmd.Parameters.AddWithValue("min", centerIdx - windowSize);
+                cmd.Parameters.AddWithValue("max", centerIdx + windowSize);
                 using var r = await cmd.ExecuteReaderAsync();
                 while (await r.ReadAsync()) sb.AppendLine(r.GetString(0));
             }
