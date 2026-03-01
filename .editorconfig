@@ -1,0 +1,4 @@
+﻿[*.cs]
+
+# SKEXP0050: Este tipo se incluye solo con fines de evaluación y está sujeto a cambios o a que se elimine en próximas actualizaciones. Suprima este diagnóstico para continuar.
+dotnet_diagnostic.SKEXP0050.severity = none
