@@ -83,10 +83,39 @@ foreach (var path in Directory.GetFiles(folder, "*.*"))
 }
 
 // 3. Xat
-Console.WriteLine("\nDigues:");
-string? q = Console.ReadLine();
+Console.ForegroundColor = ConsoleColor.Cyan;
+Console.WriteLine("\n╔════════════════════════════════════════════════════════╗");
+Console.WriteLine("║        AGENT DOCUMENTAL — Benvingut/da!               ║");
+Console.WriteLine("╠════════════════════════════════════════════════════════╣");
+Console.WriteLine("║  Soc el teu assistent sobre els documents assignats.  ║");
+Console.WriteLine("║  Fes-me qualsevol pregunta i intentaré ajudar-te.     ║");
+Console.WriteLine("║  Escriu 'sortir' per acabar la sessió.                ║");
+Console.WriteLine("╚════════════════════════════════════════════════════════╝\n");
+Console.ResetColor();
 
-if (!string.IsNullOrWhiteSpace(q))
+while (true)
 {
-    Console.WriteLine(await orchestrator.ProcessQueryAsync(q));
+    Console.ForegroundColor = ConsoleColor.Green;
+    Console.Write("Tu -> ");
+    Console.ResetColor();
+
+    string? q = Console.ReadLine();
+
+    if (string.IsNullOrWhiteSpace(q)) continue;
+    if (q.Trim().ToLower() == "sortir") break;
+
+    Console.ForegroundColor = ConsoleColor.Yellow;
+    Console.WriteLine("\nAgent -> Processant la teva consulta...\n");
+    Console.ResetColor();
+
+    string answer = await orchestrator.ProcessQueryAsync(q);
+
+    Console.ForegroundColor = ConsoleColor.White;
+    Console.WriteLine($"Agent -> {answer}");
+    Console.ResetColor();
+    Console.WriteLine();
 }
+
+Console.ForegroundColor = ConsoleColor.Cyan;
+Console.WriteLine("\nFins aviat! Sessió finalitzada.");
+Console.ResetColor();
