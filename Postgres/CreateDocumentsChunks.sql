@@ -1,15 +1,15 @@
-CREATE TABLE DocumentChunks (
-    Id SERIAL PRIMARY KEY,
-    DocumentId INTEGER NOT NULL,
-    ChunkIndex INTEGER NOT NULL,      -- Ordre: 0, 1, 2... (Crucial pel Windowing)
-    SectionTitle TEXT,                -- Títol de la secció (si es detecta)
-    RawContent TEXT NOT NULL,         -- El text original del fragment
-    Embedding vector(768),            -- El vector generat per Gemini (text-embedding-004)
-    CreatedAt TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-
-    -- Si esborrem un Document, s'esborren automàticament tots els seus chunks
-    CONSTRAINT fk_document
-      FOREIGN KEY(DocumentId) 
-	  REFERENCES Documents(Id) 
-	  ON DELETE CASCADE
-);
+CREATE TABLE IF NOT EXISTS documentchunks
+(
+    id integer NOT NULL DEFAULT nextval('documentchunks_id_seq'::regclass),
+    documentid integer NOT NULL,
+    chunkindex integer NOT NULL,
+    sectiontitle text COLLATE pg_catalog."default",
+    rawcontent text COLLATE pg_catalog."default" NOT NULL,
+    embedding vector(3072),
+    createdat timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT documentchunks_pkey PRIMARY KEY (id),
+    CONSTRAINT fk_document FOREIGN KEY (documentid)
+        REFERENCES public.documents (id) MATCH SIMPLE
+        ON UPDATE NO ACTION
+        ON DELETE CASCADE
+)
