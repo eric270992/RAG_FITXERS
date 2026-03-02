@@ -1,15 +1,17 @@
-CREATE TABLE IF NOT EXISTS documentchunks
+CREATE TABLE IF NOT EXISTS Documentchunks
 (
-    id integer NOT NULL DEFAULT nextval('documentchunks_id_seq'::regclass),
+    id SERIAL PRIMARY KEY, -- Esto crea la secuencia automáticamente
     documentid integer NOT NULL,
     chunkindex integer NOT NULL,
-    sectiontitle text COLLATE pg_catalog."default",
-    rawcontent text COLLATE pg_catalog."default" NOT NULL,
-    embedding vector(3072),
+    sectiontitle text,
+    rawcontent text NOT NULL,
+    embedding vector(3072), -- Requiere extensión pgvector instalada
     createdat timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT documentchunks_pkey PRIMARY KEY (id),
     CONSTRAINT fk_document FOREIGN KEY (documentid)
-        REFERENCES public.documents (id) MATCH SIMPLE
+        REFERENCES Documents (id) 
         ON UPDATE NO ACTION
         ON DELETE CASCADE
-)
+);
+
+-- Es fundamental indexar la FK para que el DELETE CASCADE sea rápido
+CREATE INDEX idx_documentchunks_documentid ON Documentchunks (documentid);
