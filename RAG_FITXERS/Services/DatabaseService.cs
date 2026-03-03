@@ -24,6 +24,10 @@ namespace RAG_FITXERS.Services
         /// </summary>
         private readonly NpgsqlDataSource _dataSource;
 
+        // Exposem el DataSource per poder-lo reutilitzar a altres serveis (ex: GraphService)
+        public NpgsqlDataSource DataSource => _dataSource;
+
+
         /// <summary>
         /// Inicialitza el servei configurant el suport per a vectors.
         /// UseVector() registra els tipus de pgvector (Vector) perquè Npgsql

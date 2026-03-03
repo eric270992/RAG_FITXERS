@@ -35,6 +35,7 @@ var kernel = builder.Build();
 var db = new DatabaseService(config["ConnectionStrings:DefaultConnection"]);
 var orchestrator = new RagOrchestrator(kernel, db);
 var embeddingService = kernel.GetRequiredService<IEmbeddingGenerator<string, Embedding<float>>>();
+var graphService = new GraphService(kernel, db.DataSource);
 
 // 2. Ingestió
 string folder = config["Folders:PathToFiles"];

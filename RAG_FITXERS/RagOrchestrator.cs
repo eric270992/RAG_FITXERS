@@ -16,12 +16,14 @@ namespace RAG_FITXERS
         private readonly IChatCompletionService _groq;
         private readonly IEmbeddingGenerator<string, Embedding<float>> _gemini;
         private readonly DatabaseService _db;
+        private readonly GraphService _graph;
 
         public RagOrchestrator(Kernel kernel, DatabaseService db)
         {
             _groq = kernel.GetRequiredService<IChatCompletionService>("groq");
             _gemini = kernel.GetRequiredService<IEmbeddingGenerator<string, Embedding<float>>>();
             _db = db;
+            _graph = kernel.GetRequiredService<GraphService>();
         }
 
         public async Task<string> ProcessQueryAsync(string question)
@@ -40,12 +42,26 @@ namespace RAG_FITXERS
             while (score < 80 && attempts <= 2)
             {
                 int windowSize = attempts + 1;
-                string context = await _db.GetContextWindowAsync(embeddingVec, windowSize);
+
+                // 1. Context vectorial
+                string vectorContext = await _db.GetContextWindowAsync(embeddingVec, windowSize);
+
+                // 2. Context del graf
+                string graphContext = await _graph.GetGraphContextAsync(question);
+
+                // Context final combinat
+                string fullContext = $"""
+                    CONTEXT DOCUMENTAL:
+                    {vectorContext}
+
+                    RELACIONS CONEGUDES:
+                    {(string.IsNullOrWhiteSpace(graphContext) ? "Cap relació trobada." : graphContext)}
+                    """;
 
                 Console.WriteLine($"[RAG] Intent {attempts + 1} amb finestra de {windowSize * 2 + 1} chunks...");
 
-                answer = await GenerateAsync(question, context);
-                var judgeRes = await JudgeAsync(question, context, answer);
+                answer = await GenerateAsync(question, fullContext);
+                var judgeRes = await JudgeAsync(question, fullContext, answer);
                 score = judgeRes.Score;
 
                 if (score < 80)
@@ -73,5 +89,8 @@ namespace RAG_FITXERS
             var cleanJson = raw.Substring(raw.IndexOf("{")); // Per si l'IA xerra de més
             return JsonSerializer.Deserialize<JudgeResult>(cleanJson, new JsonSerializerOptions { PropertyNameCaseInsensitive = true })!;
         }
+
+       
+
     }
 }
