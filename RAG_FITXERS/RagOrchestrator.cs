@@ -43,32 +43,50 @@ namespace RAG_FITXERS
             while (score < 80 && attempts <= 2)
             {
                 int windowSize = attempts + 1;
+                bool isAdvanced = attempts > 0;  // ← primer intent sempre simple
 
-                // 1. Context vectorial + IDs dels chunks trobats
                 var (vectorContext, chunkIds) = await _db.GetContextWindowWithIdsAsync(
                     embeddingVec, windowSize);
 
-                // 2. Triplets + IDs dels chunks de les connexions creuades
                 var (graphContext, crossChunkIds) = await _graph.GetTripletsByChunkIdsAsync(chunkIds);
 
-                // 3. Text dels chunks de les connexions creuades
-                string crossContext = await _db.GetChunksByIdsAsync(crossChunkIds);
+                string fullContext;
 
-                // 4. Context final combinat
-                // Enviarem al LLM el context vectorial dels chunks principals, el text dels chunks relacionats (si n'hi ha)
-                string fullContext = $"""
-                    CONTEXT DOCUMENTAL (chunks principals):
+                if (!isAdvanced)
+                {
+                    // Intent 1 — mínim de tokens
+                    // Enviem el text dels chunks principals + triplets
+                    // Els triplets ja resumeixen les connexions sense necessitat del text complet
+                    fullContext = $"""
+                        CONTEXT:
+                        {vectorContext}
+
+                        RELACIONS:
+                        {(string.IsNullOrWhiteSpace(graphContext) ? "Cap." : graphContext)}
+                        """;
+
+                    Console.WriteLine($"[RAG] Intent 1 — cerca simple ({windowSize * 2 + 1} chunks)...");
+                }
+                else
+                {
+                    // Intent 2+ — ampliem amb text dels chunks creuats
+                    // Només si el Judge ha dit que no té prou informació
+                    string crossContext = await _db.GetChunksByIdsAsync(crossChunkIds);
+
+                    fullContext = $"""
+                    CONTEXT PRINCIPAL:
                     {vectorContext}
 
-                    CONTEXT DOCUMENTAL (chunks relacionats):
-                    {(string.IsNullOrWhiteSpace(crossContext) ? "Cap chunk relacionat trobat." : crossContext)}
+                    CONTEXT RELACIONAT:
+                    {(string.IsNullOrWhiteSpace(crossContext) ? "Cap." : crossContext)}
 
-                    RELACIONS CONEGUDES:
-                    {(string.IsNullOrWhiteSpace(graphContext) ? "Cap relació trobada." : graphContext)}
+                    RELACIONS:
+                    {(string.IsNullOrWhiteSpace(graphContext) ? "Cap." : graphContext)}
                     """;
 
-                Console.WriteLine($"[RAG] Intent {attempts + 1} — finestra {windowSize * 2 + 1} chunks " +
-                                  $"+ {crossChunkIds.Count} chunks creuats...");
+                    Console.WriteLine($"[RAG] Intent {attempts + 1} — cerca avançada " +
+                                      $"({windowSize * 2 + 1} chunks + {crossChunkIds.Count} creuats)...");
+                }
 
                 answer = await GenerateAsync(question, fullContext);
                 var judgeRes = await JudgeAsync(question, fullContext, answer);
