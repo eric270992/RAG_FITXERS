@@ -1,5 +1,7 @@
-﻿using Npgsql;
+﻿using DocumentFormat.OpenXml.Office2010.Excel;
+using Npgsql;
 using Pgvector;
+using System.Security.Cryptography;
 using System.Text;
 
 namespace RAG_FITXERS.Services
@@ -83,7 +85,8 @@ namespace RAG_FITXERS.Services
         ///   COMMIT  ← només si tot ha anat bé
         ///   ROLLBACK ← si qualsevol pas falla
         /// </summary>
-        public async Task<int?> RegisterDocumentWithChunksAsync(
+        // Canvia el retorn de int? a (int? DocId, List<int> ChunkIds)
+        public async Task<(int? DocId, List<int> ChunkIds)> RegisterDocumentWithChunksAsync(
             string name, string path, string hash, List<(string Content, float[] Embedding)> chunks)
         {
             using var conn = await _dataSource.OpenConnectionAsync();
@@ -91,14 +94,12 @@ namespace RAG_FITXERS.Services
 
             try
             {
-                // PAS 1: Elimina versió anterior del document (re-ingestió)
                 using (var del = new NpgsqlCommand("DELETE FROM Documents WHERE FileName = @n", conn, tx))
                 {
                     del.Parameters.AddWithValue("n", name);
                     await del.ExecuteNonQueryAsync();
                 }
 
-                // PAS 2: Insereix el document i obté l'ID generat
                 int docId;
                 using (var cmd = new NpgsqlCommand(
                     "INSERT INTO Documents (FileName, FilePath, FileHash) VALUES (@n, @p, @h) RETURNING Id", conn, tx))
@@ -109,34 +110,35 @@ namespace RAG_FITXERS.Services
                     docId = (int)await cmd.ExecuteScalarAsync();
                 }
 
-                // PAS 3: Insereix tots els chunks amb els seus embeddings
+                // Recollim els IDs dels chunks inserits
+                var chunkIds = new List<int>();
                 for (int i = 0; i < chunks.Count; i++)
                 {
                     var (content, vec) = chunks[i];
                     var vector = new Pgvector.Vector(vec);
 
-                    using var cmd = new NpgsqlCommand(
-                        "INSERT INTO DocumentChunks (DocumentId, ChunkIndex, RawContent, Embedding) VALUES (@d, @i, @c, @v)",
-                        conn, tx);
+                    using var cmd = new NpgsqlCommand(@"
+                INSERT INTO DocumentChunks (DocumentId, ChunkIndex, RawContent, Embedding) 
+                VALUES (@d, @i, @c, @v)
+                RETURNING Id", conn, tx);  // ← RETURNING Id per recollir el ChunkId
                     cmd.Parameters.AddWithValue("d", docId);
                     cmd.Parameters.AddWithValue("i", i);
                     cmd.Parameters.AddWithValue("c", content);
                     cmd.Parameters.AddWithValue("v", vector);
-                    await cmd.ExecuteNonQueryAsync();
+
+                    int chunkId = (int)await cmd.ExecuteScalarAsync();
+                    chunkIds.Add(chunkId);  // ← guardem cada ChunkId
                 }
 
-                // Tot ha anat bé → confirmem els canvis
                 await tx.CommitAsync();
                 Console.WriteLine($"[DB] Document '{name}' guardat correctament ({chunks.Count} chunks).");
-                return docId;
+                return (docId, chunkIds);
             }
             catch (Exception ex)
             {
-                // Qualsevol error → desfem tots els canvis, com si no hagués passat res
                 await tx.RollbackAsync();
                 Console.WriteLine($"[ERROR] No s'ha pogut guardar '{name}': {ex.Message}");
-                Console.WriteLine($"        El document es tornarà a processar en la propera execució.");
-                return null;
+                return (null, new List<int>());
             }
         }
 
@@ -226,6 +228,54 @@ namespace RAG_FITXERS.Services
             cmd.Parameters.AddWithValue("v", vector);
             var result = await cmd.ExecuteScalarAsync();
             return result?.ToString() ?? "";
+        }
+
+        /// <summary>
+        /// Igual que GetContextWindowAsync però retorna també els ChunkIds
+        /// per poder buscar triplets associats a aquests chunks concrets
+        /// a KnowledgeGraph via GetTripletsByChunkIdsAsync.
+        /// </summary>
+        public async Task<(string Context, List<int> ChunkIds)> GetContextWindowWithIdsAsync(
+            float[] queryVector, int windowSize = 1)
+        {
+            using var conn = await _dataSource.OpenConnectionAsync();
+            var vector = new Pgvector.Vector(queryVector);
+
+            // PAS 1: Cerca vectorial — troba el chunk més proper a la pregunta
+            int docId, centerIdx;
+            using (var cmd = new NpgsqlCommand(
+                "SELECT DocumentId, ChunkIndex FROM DocumentChunks ORDER BY Embedding <=> @v LIMIT 1", conn))
+            {
+                cmd.Parameters.AddWithValue("v", vector);
+                using var r = await cmd.ExecuteReaderAsync();
+                if (!await r.ReadAsync()) return ("", new List<int>());
+                docId = r.GetInt32(0);
+                centerIdx = r.GetInt32(1);
+            }
+
+            // PAS 2: Windowing — recupera els chunks veïns i els seus IDs
+            var sb = new StringBuilder();
+            var chunkIds = new List<int>();
+
+            using (var cmd = new NpgsqlCommand(@"
+                SELECT Id, RawContent FROM DocumentChunks
+                WHERE DocumentId = @d 
+                  AND ChunkIndex BETWEEN @min AND @max
+                ORDER BY ChunkIndex", conn))
+            {
+                cmd.Parameters.AddWithValue("d", docId);
+                cmd.Parameters.AddWithValue("min", centerIdx - windowSize);
+                cmd.Parameters.AddWithValue("max", centerIdx + windowSize);
+
+                using var r = await cmd.ExecuteReaderAsync();
+                while (await r.ReadAsync())
+                {
+                    chunkIds.Add(r.GetInt32(0));   // ← ID del chunk
+                    sb.AppendLine(r.GetString(1)); // ← Text del chunk
+                }
+            }
+
+            return (sb.ToString(), chunkIds);
         }
     }
 }

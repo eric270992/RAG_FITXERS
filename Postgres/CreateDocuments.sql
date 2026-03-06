@@ -1,11 +1,11 @@
-CREATE TABLE Documents (
-    Id SERIAL PRIMARY KEY,
-    FileName TEXT NOT NULL,           -- Nom del fitxer (ej: manual.pdf)
-    FilePath TEXT NOT NULL,           -- Ruta completa al disc
-    FileHash TEXT NOT NULL,           -- Hash SHA256 del contingut per detectar canvis
-    LastProcessed TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    
-    -- Un index pel Hash ens permet saber instantàniament si ja tenim el fitxer
+CREATE TABLE IF NOT EXISTS Documents (
+    Id            SERIAL PRIMARY KEY,
+    FileName      TEXT      NOT NULL,
+    FilePath      TEXT      NOT NULL,    -- ← ruta al disc, suficient per al Nivell 4
+    FileHash      TEXT      NOT NULL,
+    Summary       TEXT,                  -- ← resum de 10 línies (Nivell 3)
+    LastProcessed TIMESTAMP NOT NULL DEFAULT NOW(),
+
     CONSTRAINT unique_file_hash UNIQUE (FileHash)
 );
 

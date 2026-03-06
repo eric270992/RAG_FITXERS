@@ -19,12 +19,12 @@ namespace RAG_FITXERS
         private readonly DatabaseService _db;
         private readonly GraphService _graph;
 
-        public RagOrchestrator(Kernel kernel, DatabaseService db)
+        public RagOrchestrator(Kernel kernel, DatabaseService db, GraphService graph)
         {
             _groq = kernel.GetRequiredService<IChatCompletionService>("groq");
             _gemini = kernel.GetRequiredService<IEmbeddingGenerator<string, Embedding<float>>>();
             _db = db;
-            _graph = kernel.GetRequiredService<GraphService>();
+            _graph = graph;
         }
 
         public async Task<string> ProcessQueryAsync(string question)
@@ -44,11 +44,10 @@ namespace RAG_FITXERS
             {
                 int windowSize = attempts + 1;
 
-                // 1. Context vectorial
-                string vectorContext = await _db.GetContextWindowAsync(embeddingVec, windowSize);
+                var (vectorContext, chunkIds) = await _db.GetContextWindowWithIdsAsync(embeddingVec, windowSize);
+                string graphContext = await _graph.GetTripletsByChunkIdsAsync(chunkIds);
 
-                // 2. Context del graf
-                string graphContext = await _graph.GetGraphContextAsync(question);
+                Console.WriteLine($"[DEBUG] Graph context: {(string.IsNullOrWhiteSpace(graphContext) ? "BUIT" : graphContext)}");
 
                 // Context final combinat
                 string fullContext = $"""

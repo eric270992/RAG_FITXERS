@@ -1,7 +1,12 @@
-﻿using Microsoft.SemanticKernel;
+﻿using DocumentFormat.OpenXml.InkML;
+using DocumentFormat.OpenXml.Office2010.Excel;
+using DocumentFormat.OpenXml.Spreadsheet;
+using Microsoft.SemanticKernel;
 using Microsoft.SemanticKernel.ChatCompletion;
 using Npgsql;
 using RAG_FITXERS.Models;
+using System.Runtime.ConstrainedExecution;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 
@@ -34,31 +39,41 @@ namespace RAG_FITXERS.Services
         /// </summary>
         public async Task ProcessChunkAsync(int docId, int chunkId, string chunkText)
         {
-            string prompt = $@"Ets un agent extractor de coneixement empresarial.
-Analitza el text i respon NOMÉS en JSON amb aquest format exacte:
+            string prompt = $@"Ets un agent extractor de coneixement.
+                Analitza el text i extreu TOTES les relacions importants que hi trobes.
+                Respon NOMÉS en JSON amb aquest format exacte:
 
-{{
-  ""mode"": ""triplets"" | ""discard"",
-  ""relations"": [
-    {{
-      ""subject"": ""nom complet de l'entitat A"",
-      ""predicate"": ""tipus de relació"",
-      ""object"": ""nom complet de l'entitat B"",
-      ""confidence"": 0-100
-    }}
-  ]
-}}
+                {{
+                  ""mode"": ""triplets"" | ""discard"",
+                  ""relations"": [
+                    {{
+                      ""subject"": ""entitat o concepte principal"",
+                      ""predicate"": ""tipus de relació o propietat"",
+                      ""object"": ""entitat, valor o concepte relacionat"",
+                      ""confidence"": 0-100
+                    }}
+                  ]
+                }}
 
-REGLES:
-- Usa SEMPRE noms complets per evitar ambigüitats (ex: 'Joan García', mai 'Joan')
-- Si dues entitats tenen el mateix nom afegeix context (ex: 'Maria López (RRHH)')
-- mode='triplets' NOMÉS si les relacions són clares i verificables al text
-- mode='discard' si el text és descriptiu, un índex, capçalera o sense entitats clares
-- Un triplet amb confidence < {MIN_CONFIDENCE} és millor no incloure'l
-- Si no n'hi ha cap de fiable, usa mode='discard'
+                REGLES GENERALS:
+                - Extreu QUALSEVOL relació verificable al text:
+                  * Qui fa què
+                  * Qui té quina propietat (càrrec, data, valor, import...)
+                  * Què pertany a què
+                  * Què és responsable de què
+                  * Quina xifra o data s'associa a quin concepte
+                - Usa sempre el nom o identificador MÉS COMPLET possible
+                  Correcte:   ""Elena Puig Gual""
+                  Incorrecte: ""Elena""
+                - Si una entitat té context important, afegeix-lo entre parèntesis
+                  Exemple: ""Jordi Amat Bosc (Director Financer)""
+                - mode='triplets' si hi ha relacions clares i verificables
+                - mode='discard' si el text és descriptiu sense dades concretes,
+                  un índex, una capçalera o no té informació factual útil
+                - confidence < {MIN_CONFIDENCE} → no incloguis el triplet
 
-TEXT:
-{chunkText}";
+                TEXT:
+                {chunkText}";
 
             try
             {
@@ -207,5 +222,51 @@ TEXT:
 
             return sb.ToString();
         }
+
+        public async Task<string> GetTripletsByChunkIdsAsync(List<int> chunkIds)
+        {
+            if (chunkIds.Count == 0) return "";
+
+            using var conn = await _dataSource.OpenConnectionAsync();
+            var idList = string.Join(",", chunkIds);
+            var sb = new StringBuilder();
+            var entities = new HashSet<string>();
+
+            // PAS 1: Triplets directes dels chunks trobats per cerca vectorial
+            using (var cmd = new NpgsqlCommand($@"
+                SELECT d.FileName, kg.Subject, kg.Predicate, kg.Object
+                FROM KnowledgeGraph kg
+                INNER JOIN Documents d ON d.Id = kg.DocumentId
+                WHERE kg.ChunkId IN ({idList})", conn))
+            {
+                using var r = await cmd.ExecuteReaderAsync();
+                while (await r.ReadAsync())
+                {
+                    sb.AppendLine($"[{r.GetString(0)}] {r.GetString(1)} → {r.GetString(2)} → {r.GetString(3)}");
+                    entities.Add(r.GetString(1)); // Subject
+                    entities.Add(r.GetString(3)); // Object
+                }
+            }
+
+            // PAS 2: Connexions creuades — altres triplets que connectin
+            // amb les entitats trobades en altres documents
+            foreach (var entity in entities)
+            {
+                using var cmd = new NpgsqlCommand($@"
+            SELECT d.FileName, kg.Subject, kg.Predicate, kg.Object
+            FROM KnowledgeGraph kg
+            INNER JOIN Documents d ON d.Id = kg.DocumentId
+            WHERE (lower(kg.Subject) LIKE lower(@e) OR lower(kg.Object) LIKE lower(@e))
+              AND kg.ChunkId NOT IN ({idList})", conn);
+
+                cmd.Parameters.AddWithValue("e", $"%{entity}%");
+                using var r = await cmd.ExecuteReaderAsync();
+                while (await r.ReadAsync())
+                    sb.AppendLine($"[CONNEXIÓ][{r.GetString(0)}] {r.GetString(1)} → {r.GetString(2)} → {r.GetString(3)}");
+            }
+
+            return sb.ToString();
+        }
+
     }
 }

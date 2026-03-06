@@ -34,9 +34,9 @@ builder.AddGoogleAIEmbeddingGenerator(
 
 var kernel = builder.Build();
 var db = new DatabaseService(config["ConnectionStrings:DefaultConnection"]);
-var orchestrator = new RagOrchestrator(kernel, db);
-var embeddingService = kernel.GetRequiredService<IEmbeddingGenerator<string, Embedding<float>>>();
 var graphService = new GraphService(kernel, db.DataSource);
+var orchestrator = new RagOrchestrator(kernel, db, graphService);
+var embeddingService = kernel.GetRequiredService<IEmbeddingGenerator<string, Embedding<float>>>();
 
 // Creem la classe amb tools
 var ragPlugin = new RagPlugin(orchestrator);
@@ -82,7 +82,22 @@ foreach (var path in Directory.GetFiles(folder, "*.*"))
 
         // Guardem document + chunks en una sola transacció atòmica.
         // Si falla qualsevol INSERT → ROLLBACK complet.
-        await db.RegisterDocumentWithChunksAsync(fileName, path, hash, chunksAmbEmbeddings);
+        // Guardem document + chunks → retorna el docId i els chunkIds associats per a aquest document.
+        var (docId, chunkIds) = await db.RegisterDocumentWithChunksAsync(
+            fileName, path, hash, chunksAmbEmbeddings);
+
+        if (docId == null) continue;
+
+        // Extraiem triplets per cada chunk i els desem a KnowledgeGraph
+        Console.WriteLine($"[GRAPH] Extraient coneixement de '{fileName}'...");
+        for (int i = 0; i < chunksAmbEmbeddings.Count; i++)
+        {
+            await graphService.ProcessChunkAsync(
+                docId.Value,      // ID del document
+                chunkIds[i],      // ID del chunk concret
+                chunksAmbEmbeddings[i].Content  // Text del chunk
+            );
+        }
     }
     catch (Exception ex)
     {
