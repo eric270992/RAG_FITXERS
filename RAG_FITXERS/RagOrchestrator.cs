@@ -4,6 +4,7 @@ using Microsoft.SemanticKernel.ChatCompletion;
 using Microsoft.SemanticKernel.Embeddings;
 using RAG_FITXERS.Models;
 using RAG_FITXERS.Services;
+using RAG_FITXERS.Utils;
 using System;
 using System.Collections.Generic;
 using System.Text;
@@ -71,6 +72,16 @@ namespace RAG_FITXERS
                 }
             }
 
+            //Si la cerca vectorial + graf no és suficient, oferim el document sencer:
+            if (score < 80)
+            {
+                // 1. Recuperem el text sencer del document
+                string fullDocument = await GetFullDocumentAsync(question);
+
+                // 2. Generem la resposta amb Groq a partir del document sencer
+                return await GenerateAsync(question, fullDocument);
+            }
+
             return answer;
         }
 
@@ -90,7 +101,41 @@ namespace RAG_FITXERS
             return JsonSerializer.Deserialize<JudgeResult>(cleanJson, new JsonSerializerOptions { PropertyNameCaseInsensitive = true })!;
         }
 
-       
+        /// <summary>
+        /// Nivell 4 del Hierarchical Retrieval — Últim recurs.
+        /// Llegeix el document sencer des del disc quan cap altra cerca
+        /// ha trobat prou informació per respondre la pregunta.
+        ///
+        /// Flux:
+        ///   Pregunta → Embedding → Ruta del fitxer (BD) → Text sencer (disc)
+        /// </summary>
+        public async Task<string> GetFullDocumentAsync(string question)
+        {
+            // Convertim la pregunta a un vector de 3072 dimensions (gemini-embedding-001)
+            // per poder buscar quin document és el més rellevant semànticament
+            var result = await _gemini.GenerateAsync(new[] { question });
+            float[] vec = result[0].Vector.ToArray();
+
+            // Busquem a PostgreSQL la ruta del document el chunk del qual
+            // té el vector més proper al de la pregunta (distància cosinus)
+            // Retorna el FilePath del document més rellevant
+            string filePath = await _db.GetMostRelevantFilePathAsync(vec);
+
+            // Verifiquem que la ruta existeix tant a la BD com al disc
+            // És possible que el fitxer s'hagi eliminat o mogut des de la ingestió
+            if (string.IsNullOrWhiteSpace(filePath) || !File.Exists(filePath))
+                return "No s'ha trobat el document al disc.";
+
+            Console.WriteLine($"[N4] Llegint document sencer: {filePath}");
+
+            // Llegim el contingut sencer del fitxer des del disc.
+            // FileUtils.ExtractAsync suporta múltiples formats (PDF, DOCX, TXT...)
+            // i retorna el text net sense format, llest per enviar al LLM.
+            // NOTA: Aquest text pot ser molt llarg — és tot el document sense chunketjar.
+            return await FileUtils.ExtractAsync(filePath);
+        }
+
+
 
     }
 }

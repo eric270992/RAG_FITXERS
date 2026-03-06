@@ -5,6 +5,7 @@ using Microsoft.SemanticKernel;
 using Microsoft.SemanticKernel.Connectors.Google;
 using Microsoft.SemanticKernel.Text;
 using RAG_FITXERS;
+using RAG_FITXERS.Plugins;
 using RAG_FITXERS.Services;
 using RAG_FITXERS.Utils;
 
@@ -36,6 +37,13 @@ var db = new DatabaseService(config["ConnectionStrings:DefaultConnection"]);
 var orchestrator = new RagOrchestrator(kernel, db);
 var embeddingService = kernel.GetRequiredService<IEmbeddingGenerator<string, Embedding<float>>>();
 var graphService = new GraphService(kernel, db.DataSource);
+
+// Creem la classe amb tools
+var ragPlugin = new RagPlugin(orchestrator);
+
+// Les expose al kernel perquè siguin accessibles des dels prompts
+kernel.Plugins.AddFromObject(ragPlugin, "DocumentsEmpresa");
+
 
 // 2. Ingestió
 string folder = config["Folders:PathToFiles"];

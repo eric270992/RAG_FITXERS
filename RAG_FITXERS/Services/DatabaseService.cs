@@ -205,5 +205,27 @@ namespace RAG_FITXERS.Services
 
             return sb.ToString();
         }
+
+        /// <summary>
+        /// Retorna la ruta del fitxer del document més rellevant per a la pregunta.
+        /// S'usa al Nivell 4 per llegir el document sencer des del disc
+        /// en lloc de tenir el contingut duplicat a la BD.
+        /// </summary>
+        public async Task<string> GetMostRelevantFilePathAsync(float[] queryVector)
+        {
+            using var conn = await _dataSource.OpenConnectionAsync();
+            var vector = new Pgvector.Vector(queryVector);
+
+            using var cmd = new NpgsqlCommand(@"
+                SELECT d.FilePath
+                FROM DocumentChunks dc
+                INNER JOIN Documents d ON d.Id = dc.DocumentId
+                ORDER BY dc.Embedding <=> @v
+                LIMIT 1", conn);
+
+            cmd.Parameters.AddWithValue("v", vector);
+            var result = await cmd.ExecuteScalarAsync();
+            return result?.ToString() ?? "";
+        }
     }
 }
