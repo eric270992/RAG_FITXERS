@@ -277,5 +277,32 @@ namespace RAG_FITXERS.Services
 
             return (sb.ToString(), chunkIds);
         }
+
+        /// <summary>
+        /// Recupera el text dels chunks de les connexions creuades del GraphRAG.
+        /// S'usa per complementar el context vectorial amb el text dels chunks
+        /// trobats a través de les connexions entre entitats.
+        /// </summary>
+        public async Task<string> GetChunksByIdsAsync(List<int> chunkIds)
+        {
+            if (chunkIds.Count == 0) return "";
+
+            using var conn = await _dataSource.OpenConnectionAsync();
+            var idList = string.Join(",", chunkIds);
+
+            using var cmd = new NpgsqlCommand($@"
+                SELECT d.FileName, dc.RawContent
+                FROM DocumentChunks dc
+                INNER JOIN Documents d ON d.Id = dc.DocumentId
+                WHERE dc.Id IN ({idList})
+                ORDER BY d.FileName", conn);
+
+            var sb = new StringBuilder();
+            using var r = await cmd.ExecuteReaderAsync();
+            while (await r.ReadAsync())
+                sb.AppendLine($"[{r.GetString(0)}] {r.GetString(1)}");
+
+            return sb.ToString();
+        }
     }
 }

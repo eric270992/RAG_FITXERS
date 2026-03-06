@@ -44,21 +44,31 @@ namespace RAG_FITXERS
             {
                 int windowSize = attempts + 1;
 
-                var (vectorContext, chunkIds) = await _db.GetContextWindowWithIdsAsync(embeddingVec, windowSize);
-                string graphContext = await _graph.GetTripletsByChunkIdsAsync(chunkIds);
+                // 1. Context vectorial + IDs dels chunks trobats
+                var (vectorContext, chunkIds) = await _db.GetContextWindowWithIdsAsync(
+                    embeddingVec, windowSize);
 
-                Console.WriteLine($"[DEBUG] Graph context: {(string.IsNullOrWhiteSpace(graphContext) ? "BUIT" : graphContext)}");
+                // 2. Triplets + IDs dels chunks de les connexions creuades
+                var (graphContext, crossChunkIds) = await _graph.GetTripletsByChunkIdsAsync(chunkIds);
 
-                // Context final combinat
+                // 3. Text dels chunks de les connexions creuades
+                string crossContext = await _db.GetChunksByIdsAsync(crossChunkIds);
+
+                // 4. Context final combinat
+                // Enviarem al LLM el context vectorial dels chunks principals, el text dels chunks relacionats (si n'hi ha)
                 string fullContext = $"""
-                    CONTEXT DOCUMENTAL:
+                    CONTEXT DOCUMENTAL (chunks principals):
                     {vectorContext}
+
+                    CONTEXT DOCUMENTAL (chunks relacionats):
+                    {(string.IsNullOrWhiteSpace(crossContext) ? "Cap chunk relacionat trobat." : crossContext)}
 
                     RELACIONS CONEGUDES:
                     {(string.IsNullOrWhiteSpace(graphContext) ? "Cap relació trobada." : graphContext)}
                     """;
 
-                Console.WriteLine($"[RAG] Intent {attempts + 1} amb finestra de {windowSize * 2 + 1} chunks...");
+                Console.WriteLine($"[RAG] Intent {attempts + 1} — finestra {windowSize * 2 + 1} chunks " +
+                                  $"+ {crossChunkIds.Count} chunks creuats...");
 
                 answer = await GenerateAsync(question, fullContext);
                 var judgeRes = await JudgeAsync(question, fullContext, answer);

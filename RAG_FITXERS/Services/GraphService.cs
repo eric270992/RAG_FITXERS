@@ -223,16 +223,24 @@ namespace RAG_FITXERS.Services
             return sb.ToString();
         }
 
-        public async Task<string> GetTripletsByChunkIdsAsync(List<int> chunkIds)
+        /// <summary>
+        /// Mètode que retorna els triplets associats a una llista de ChunkIds, incloent també les connexions creuades amb altres chunks que comparteixen entitats.
+        /// </summary>
+        /// <param name="chunkIds"></param>
+        /// <returns>
+        /// Cadena formatada amb els triplets associats als ChunkIds proporcionats, incloent les connexions creuades.
+        /// </returns>
+        public async Task<(string Triplets, List<int> CrossChunkIds)> GetTripletsByChunkIdsAsync(List<int> chunkIds)
         {
-            if (chunkIds.Count == 0) return "";
+            if (chunkIds.Count == 0) return ("", new List<int>());
 
             using var conn = await _dataSource.OpenConnectionAsync();
             var idList = string.Join(",", chunkIds);
             var sb = new StringBuilder();
             var entities = new HashSet<string>();
+            var crossChunkIds = new List<int>();  // ← NOU: guardem els ChunkIds creuats
 
-            // PAS 1: Triplets directes dels chunks trobats per cerca vectorial
+            // PAS 3: Triplets directes
             using (var cmd = new NpgsqlCommand($@"
                 SELECT d.FileName, kg.Subject, kg.Predicate, kg.Object
                 FROM KnowledgeGraph kg
@@ -243,29 +251,37 @@ namespace RAG_FITXERS.Services
                 while (await r.ReadAsync())
                 {
                     sb.AppendLine($"[{r.GetString(0)}] {r.GetString(1)} → {r.GetString(2)} → {r.GetString(3)}");
-                    entities.Add(r.GetString(1)); // Subject
-                    entities.Add(r.GetString(3)); // Object
+                    entities.Add(r.GetString(1));
+                    entities.Add(r.GetString(3));
                 }
             }
 
-            // PAS 2: Connexions creuades — altres triplets que connectin
-            // amb les entitats trobades en altres documents
+            // PAS 4: Connexions creuades — ara també recollim els ChunkIds
             foreach (var entity in entities)
             {
                 using var cmd = new NpgsqlCommand($@"
-            SELECT d.FileName, kg.Subject, kg.Predicate, kg.Object
-            FROM KnowledgeGraph kg
-            INNER JOIN Documents d ON d.Id = kg.DocumentId
-            WHERE (lower(kg.Subject) LIKE lower(@e) OR lower(kg.Object) LIKE lower(@e))
-              AND kg.ChunkId NOT IN ({idList})", conn);
+                    SELECT kg.ChunkId, d.FileName, kg.Subject, kg.Predicate, kg.Object
+                    FROM KnowledgeGraph kg
+                    INNER JOIN Documents d ON d.Id = kg.DocumentId
+                    WHERE (lower(kg.Subject) LIKE lower(@e)
+                       OR  lower(kg.Object)  LIKE lower(@e))
+                    AND kg.ChunkId NOT IN ({idList})", conn);
 
                 cmd.Parameters.AddWithValue("e", $"%{entity}%");
+
                 using var r = await cmd.ExecuteReaderAsync();
                 while (await r.ReadAsync())
-                    sb.AppendLine($"[CONNEXIÓ][{r.GetString(0)}] {r.GetString(1)} → {r.GetString(2)} → {r.GetString(3)}");
+                {
+                    int crossChunkId = r.GetInt32(0);
+                    sb.AppendLine($"[CONNEXIÓ][{r.GetString(1)}] {r.GetString(2)} → {r.GetString(3)} → {r.GetString(4)}");
+
+                    // Guardem el ChunkId del document connectat
+                    if (!crossChunkIds.Contains(crossChunkId))
+                        crossChunkIds.Add(crossChunkId);  // ← NOU
+                }
             }
 
-            return sb.ToString();
+            return (sb.ToString(), crossChunkIds);  // ← retornem també els ChunkIds creuats
         }
 
     }
