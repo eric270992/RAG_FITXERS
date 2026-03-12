@@ -1,82 +1,33 @@
 ﻿# RAG_FITXERS — Sistema de Cerca Semàntica sobre Documents
 
-> Projecte de **Retrieval-Augmented Generation (RAG)** en C# amb Semantic Kernel, Groq, Gemini i PostgreSQL + pgvector.
+> Projecte de **Retrieval‑Augmented Generation (RAG)** en C# amb Semantic Kernel, Groq, Gemini i PostgreSQL + pgvector.
 
 ---
 
 ## Índex
 
-- [Què és RAG?](#què-és-rag)
-- [Què és un Vector o Embedding?](#què-és-un-vector-o-embedding)
-- [Arquitectura del projecte](#arquitectura-del-projecte)
-- [Classes principals](#classes-principals)
-- [Com funciona PostgreSQL + pgvector](#com-funciona-postgresql--pgvector)
-- [Sistema de cerca vectorial](#sistema-de-cerca-vectorial)
-- [Flux complet](#flux-complet)
-- [Configuració](#configuració)
+- [Què és RAG?](#què-és-rag)  
+- [Què és un Vector o Embedding?](#què-és-un-vector-o-embedding)  
+- [Arquitectura del projecte](#arquitectura-del-projecte)  
+- [Classes principals](#classes-principals)  
+- [Com funciona PostgreSQL + pgvector](#com-funciona-postgresql--pgvector)  
+- [Sistema de cerca vectorial](#sistema-de-cerca-vectorial)  
+- [Sistema de triplets i fallback al context global](#sistema-de-triplets-i-fallback-al-context-global)  
+- [Flux complet](#flux-complet)  
+- [Configuració](#configuració)  
 - [Requisits](#requisits)
 
 ---
 
 ## Què és RAG?
 
-**RAG (Retrieval-Augmented Generation)** és una tècnica que millora les respostes dels models de llenguatge (LLMs) combinant dos components:
-
-1. **Recuperació (Retrieval):** Busca fragments de documents rellevants per a una pregunta concreta, usant cerca semàntica per vectors.
-2. **Generació (Generation):** Un LLM genera la resposta final basant-se en el context recuperat, en lloc d'inventar-se la informació.
-
-```
-Pregunta de l'usuari
-        │
-        ▼
- Convertir a embedding (Gemini)
-        │
-        ▼
- Cerca vectorial a PostgreSQL
-        │
-        ▼
- Recuperar chunks rellevants
-        │
-        ▼
- Enviar context + pregunta al LLM (Groq / Llama)
-        │
-        ▼
- Resposta basada en els documents reals
-```
-
-**Per què usar RAG?**
-- Els LLMs tenen un tall de coneixement (knowledge cutoff) i no coneixen els teus documents privats.
-- RAG permet respondre preguntes sobre qualsevol document sense necessitat de re-entrenar el model.
-- Les respostes estan fonamentades en fonts reals, reduint les al·lucinacions.
+**RAG (Retrieval‑Augmented Generation)** combina recuperació semàntica de documents amb la generació d'un LLM per produir respostes fonamentades en contingut real. El pipeline recupera fragments rellevants i els usa com a context per al model de xat.
 
 ---
 
 ## Què és un Vector o Embedding?
 
-Un **embedding** és una representació numèrica del significat semàntic d'un text, expressada com un vector de N dimensions (números decimals).
-
-El model `gemini-embedding-001` de Google converteix qualsevol text en un vector de **3072 dimensions**.
-
-### Exemple simplificat (en 2 dimensions):
-
-```
-"El gat menja peix"         → [0.91, 0.08]
-"El felí s'alimenta de peix" → [0.88, 0.10]  ← MOLT PROPER (mateix significat)
-"La borsa puja avui"         → [0.05, 0.97]  ← LLUNYÀ (diferent significat)
-```
-
-Texts amb **significat similar** produeixen vectors **propers en l'espai matemàtic**, independentment de les paraules exactes usades. Això permet fer cerques per significat, no per paraules clau.
-
-### Distància cosinus (`<=>`)
-
-La similitud entre dos vectors es mesura amb la **distància cosinus**, que calcula l'angle entre ells:
-
-| Distància | Significat |
-|-----------|------------|
-| `0.0` | Vectors idèntics (màxima similitud) |
-| `0.5` | Similitud moderada |
-| `1.0` | Cap relació |
-| `2.0` | Significats oposats |
+Un **embedding** és una representació numèrica (vector) que codifica el significat d'un text. Vectors pròxims representen contingut semàntic similar. Al projecte s'utilitza `gemini-embedding-001` (3072 dimensions), i la similitud es mesura amb distància cosinus (`<=>` en `pgvector`).
 
 ---
 
@@ -199,6 +150,28 @@ Chunk N+1: "...efectes secundaris inclouen..."   ← veí posterior
 
 ---
 
+## Sistema de triplets i fallback al context global
+
+Per millorar la precisió en dominis específics, s'implementa un sistema de [triplets de retroalimentació (feedback triplets)](#), on el model pot recuperar informació addicional sobre:
+
+1. **El document més rellevant**
+2. **El fragment més rellevant**
+3. **Una resposta generada prèviament**
+
+En cas que la resposta generada no superi un llindar de confiança, es fa un **fallback** a un context global o a un fragment alternatiu del document.
+
+### Exemple de triplet
+
+```sql
+SELECT RawContent
+FROM DocumentChunks
+WHERE DocumentId = @docId
+  AND ChunkIndex IN (@relevantChunkIdx, @alternativeChunkIdx)
+ORDER BY ChunkIndex;
+```
+
+---
+
 ## Flux complet
 
 ### Fase d'ingestió (una sola vegada per document)
@@ -269,7 +242,7 @@ Crea un fitxer `configs.json` a l'arrel del projecte:
 
 | Component | Versió |
 |-----------|--------|
-| .NET | 8.0+ |
+| .NET | 8.0+ |                                         
 | PostgreSQL | 15+ |
 | pgvector | 0.5+ |
 | Microsoft.SemanticKernel | Darrera versió estable |
@@ -282,10 +255,9 @@ Crea un fitxer `configs.json` a l'arrel del projecte:
 ```yaml
 services:
   postgres:
-    image: pgvector/pgvector:pg16
+    image: pgvector/pgvector:pg16                                                                                           
     environment:
       POSTGRES_PASSWORD: pass
       POSTGRES_DB: rag_db
     ports:
       - "5432:5432"
-```
