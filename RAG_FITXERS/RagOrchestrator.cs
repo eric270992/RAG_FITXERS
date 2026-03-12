@@ -18,6 +18,7 @@ namespace RAG_FITXERS
         private readonly IEmbeddingGenerator<string, Embedding<float>> _gemini;
         private readonly DatabaseService _db;
         private readonly GraphService _graph;
+        private const int minScoreThreshold = 80;
 
         public RagOrchestrator(Kernel kernel, DatabaseService db, GraphService graph)
         {
@@ -40,7 +41,7 @@ namespace RAG_FITXERS
             // Intent 0 → windowSize 1 → 3 chunks
             // Intent 1 → windowSize 2 → 5 chunks
             // Intent 2 → windowSize 3 → 7 chunks
-            while (score < 80 && attempts <= 2)
+            while (score < minScoreThreshold && attempts <= 2)
             {
                 int windowSize = attempts + 1;
                 bool isAdvanced = attempts > 0;  // ← primer intent sempre simple
@@ -92,7 +93,7 @@ namespace RAG_FITXERS
                 var judgeRes = await JudgeAsync(question, fullContext, answer);
                 score = judgeRes.Score;
 
-                if (score < 80)
+                if (score < minScoreThreshold)
                 {
                     Console.WriteLine($"[JUDGE] Score {score}/100: {judgeRes.Reason}. Ampliant context...");
                     attempts++;
@@ -100,7 +101,7 @@ namespace RAG_FITXERS
             }
 
             //Si la cerca vectorial + graf no és suficient, oferim el document sencer:
-            if (score < 80)
+            if (score < minScoreThreshold)
             {
                 // 1. Recuperem el text sencer del document
                 string fullDocument = await GetFullDocumentAsync(question);
@@ -120,7 +121,7 @@ namespace RAG_FITXERS
 
         private async Task<JudgeResult> JudgeAsync(string q, string c, string a)
         {
-            var prompt = $@"Avalua la resposta (0-100) segons el context. Respon en JSON: {{""score"": 80, ""reason"": ""...""}}
+            var prompt = $@"Avalua la resposta (0-100) segons el context. Respon en JSON: {{""score"": X, ""reason"": ""...""}}, substitueix X per el valor de score que generes,
                         CONTEXT: {c} | PREGUNTA: {q} | RESPOSTA: {a}";
 
             var raw = (await _groq.GetChatMessageContentAsync(prompt)).ToString();
