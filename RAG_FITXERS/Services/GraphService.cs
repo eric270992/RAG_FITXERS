@@ -284,5 +284,69 @@ namespace RAG_FITXERS.Services
             return (sb.ToString(), crossChunkIds);  // ← retornem també els ChunkIds creuats
         }
 
+        /// <summary>
+        /// Cerca triplets específics per a les entitats que el Judge ha indicat
+        /// que falten al context. Més precís que GetTripletsByChunkIdsAsync
+        /// perquè busca exactament el que el LLM necessita, no totes les entitats.
+        /// </summary>
+        public async Task<string> GetTripletsByEntitiesAsync(
+            List<string> missingEntities, List<int> alreadySeenChunkIds)
+        {
+            if (!missingEntities.Any()) return "";
+
+            using var conn = await _dataSource.OpenConnectionAsync();
+            var excludeList = string.Join(",", alreadySeenChunkIds.DefaultIfEmpty(-1));
+            var sb = new StringBuilder();
+
+            Console.ForegroundColor = ConsoleColor.Magenta;
+            Console.WriteLine($"\n  [JUDGE→GRAPH] Cercant entitats específiques:");
+
+            foreach (var entity in missingEntities)
+            {
+                Console.WriteLine($"    → \"{entity}\"");
+
+                using var cmd = new NpgsqlCommand($@"
+            SELECT kg.ChunkId, d.FileName, kg.Subject, kg.Predicate, kg.Object,
+                   dc.Summary
+            FROM KnowledgeGraph kg
+            INNER JOIN Documents d       ON d.Id  = kg.DocumentId
+            INNER JOIN DocumentChunks dc ON dc.Id = kg.ChunkId
+            WHERE (lower(kg.Subject) LIKE lower(@e)
+               OR  lower(kg.Object)  LIKE lower(@e))
+            AND kg.ChunkId NOT IN ({excludeList})
+            LIMIT 5", conn);
+
+                cmd.Parameters.AddWithValue("e", $"%{entity}%");
+
+                bool found = false;
+                using var r = await cmd.ExecuteReaderAsync();
+                while (await r.ReadAsync())
+                {
+                    found = true;
+                    string summary = r.IsDBNull(5) ? "" : r.GetString(5);
+
+                    Console.ForegroundColor = ConsoleColor.Magenta;
+                    Console.WriteLine($"      [{r.GetString(1)}] {r.GetString(2)} → {r.GetString(3)} → {r.GetString(4)}");
+                    if (!string.IsNullOrWhiteSpace(summary))
+                        Console.WriteLine($"      Context: {summary}");
+                    Console.ResetColor();
+
+                    sb.AppendLine($"[ENTITAT CERCADA: {entity}][{r.GetString(1)}] " +
+                                  $"{r.GetString(2)} → {r.GetString(3)} → {r.GetString(4)}");
+                    if (!string.IsNullOrWhiteSpace(summary))
+                        sb.AppendLine($"  Context: {summary}");
+                }
+
+                if (!found)
+                {
+                    Console.ForegroundColor = ConsoleColor.DarkGray;
+                    Console.WriteLine($"      (no trobat al KnowledgeGraph)");
+                    Console.ResetColor();
+                }
+            }
+
+            return sb.ToString();
+        }
+
     }
 }

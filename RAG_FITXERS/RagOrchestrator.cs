@@ -28,90 +28,147 @@ namespace RAG_FITXERS
             _graph = graph;
         }
 
+        /// <summary>
+        /// Pipeline RAG complet per a una pregunta de l'usuari.
+        ///
+        /// Implementa un sistema de recuperació jerarquitzat amb 4 nivells:
+        ///   N1+2: Cerca vectorial + GraphRAG amb resums (Proposta 1)
+        ///         + cerca dirigida per entitats específiques (Proposta 2)
+        ///   N3:   (pendent) Resum del document
+        ///   N4:   Document sencer llegit des del disc (últim recurs)
+        ///
+        /// El Judge avalua cada resposta i guia el sistema cap a més context
+        /// si la resposta no és suficientment bona (score menor que 80).
+        /// </summary>
         public async Task<string> ProcessQueryAsync(string question)
         {
+            // Convertim la pregunta a un vector de 3072 dimensions (Gemini)
+            // Aquest vector s'usarà per cercar chunks semànticament similars a la BD
             var embeddingResult = await _gemini.GenerateAsync(new[] { question });
             float[] embeddingVec = embeddingResult[0].Vector.ToArray();
 
             string answer = "";
             int attempts = 0;
             int score = 0;
+            bool needsMoreContext = false;
 
-            // Cada reintent amplia la finestra de context:
-            // Intent 0 → windowSize 1 → 3 chunks
-            // Intent 1 → windowSize 2 → 5 chunks
-            // Intent 2 → windowSize 3 → 7 chunks
-            while (score < minScoreThreshold && attempts <= 2)
+            // Acumulem els ChunkIds vistos en tots els intents per evitar
+            // repetir cerques sobre chunks que el Judge ja ha avaluat
+            var allSeenChunkIds = new List<int>();
+
+            // Bucle de reintents: cada iteració amplia el context fins que
+            // el Judge dona score >= 80 o s'esgoten els 3 intents
+            while (score < 80 && attempts <= 2)
             {
+                // windowSize creix amb cada reintent:
+                //   Intent 0 → windowSize 1 → 3 chunks  (central ± 1)
+                //   Intent 1 → windowSize 2 → 5 chunks  (central ± 2)
+                //   Intent 2 → windowSize 3 → 7 chunks  (central ± 3)
                 int windowSize = attempts + 1;
-                bool isAdvanced = attempts > 0;  // ← primer intent sempre simple
 
+                Console.ForegroundColor = ConsoleColor.DarkGray;
+                Console.WriteLine($"\n┌─ Intent {attempts + 1} (finestra {windowSize * 2 + 1} chunks)");
+                Console.ResetColor();
+
+                // NIVELL 1 — Cerca vectorial + windowing
+                // Retorna el text dels chunks més propers semànticament a la pregunta
+                // i els seus IDs per poder buscar triplets associats
                 var (vectorContext, chunkIds) = await _db.GetContextWindowWithIdsAsync(
                     embeddingVec, windowSize);
 
-                var (graphContext, crossChunkIds) = await _graph.GetTripletsByChunkIdsAsync(chunkIds);
+                // Registrem els chunks d'aquest intent per excloure'ls
+                // de les cerques dirigides per entitats dels intents posteriors
+                foreach (var id in chunkIds)
+                    if (!allSeenChunkIds.Contains(id))
+                        allSeenChunkIds.Add(id);
 
-                string fullContext;
+                Console.ForegroundColor = ConsoleColor.DarkGray;
+                Console.WriteLine($"  [VECTOR] {chunkIds.Count} chunks: [{string.Join(", ", chunkIds)}]");
+                Console.ResetColor();
 
-                if (!isAdvanced)
+                // NIVELL 2 — GraphRAG (Proposta 1)
+                // Per cada chunk trobat:
+                //   - Busca triplets directes a KnowledgeGraph (Subject → Predicate → Object)
+                //   - Per cada entitat dels triplets, busca connexions a altres documents
+                //   - Retorna els resums dels chunks creuats (~30 tokens) en lloc del text complet (~150 tokens)
+                var (graphContext, _) = await _graph.GetTripletsByChunkIdsAsync(chunkIds);
+
+                // CERCA DIRIGIDA — Judge amb entitats (Proposta 2)
+                // Si el Judge de l'intent anterior ha indicat que falta informació sobre
+                // entitats concretes (ex: "Carla Valls Rovira", "COMP-2024-022"),
+                // les cerquem directament al KnowledgeGraph en lloc de buscar
+                // totes les entitats de forma exhaustiva.
+                // Això redueix soroll i tokens respecte a la cerca per connexions creuades genèrica.
+                string directedContext = "";
+                if (needsMoreContext && judgeResult?.MissingEntities?.Any() == true)
                 {
-                    // Intent 1 — mínim de tokens
-                    // Enviem el text dels chunks principals + triplets
-                    // Els triplets ja resumeixen les connexions sense necessitat del text complet
-                    fullContext = $"""
-                        CONTEXT:
-                        {vectorContext}
-
-                        RELACIONS:
-                        {(string.IsNullOrWhiteSpace(graphContext) ? "Cap." : graphContext)}
-                        """;
-
-                    Console.WriteLine($"[RAG] Intent 1 — cerca simple ({windowSize * 2 + 1} chunks)...");
-                }
-                else
-                {
-                    // Intent 2+ — ampliem amb text dels chunks creuats
-                    // Només si el Judge ha dit que no té prou informació
-                    string crossContext = await _db.GetChunksByIdsAsync(crossChunkIds);
-
-                    fullContext = $"""
-                    CONTEXT PRINCIPAL:
-                    {vectorContext}
-
-                    CONTEXT RELACIONAT:
-                    {(string.IsNullOrWhiteSpace(crossContext) ? "Cap." : crossContext)}
-
-                    RELACIONS:
-                    {(string.IsNullOrWhiteSpace(graphContext) ? "Cap." : graphContext)}
-                    """;
-
-                    Console.WriteLine($"[RAG] Intent {attempts + 1} — cerca avançada " +
-                                      $"({windowSize * 2 + 1} chunks + {crossChunkIds.Count} creuats)...");
+                    // GetTripletsByEntitiesAsync busca exactament les entitats que el Judge
+                    // ha indicat que falten, excloent els chunks que ja hem vist
+                    directedContext = await _graph.GetTripletsByEntitiesAsync(
+                        judgeResult.MissingEntities,
+                        allSeenChunkIds);
                 }
 
+                // Construïm el context final combinant les tres fonts:
+                //   1. vectorContext:    text dels chunks trobats per similitud semàntica
+                //   2. graphContext:     triplets + resums dels documents relacionats
+                //   3. directedContext:  triplets de les entitats específiques que el Judge ha demanat
+                //                        (buit al primer intent, s'omple si el Judge ho indica)
+                string fullContext = $"""
+            CONTEXT:
+            {vectorContext}
+
+            RELACIONS:
+            {(string.IsNullOrWhiteSpace(graphContext) ? "Cap." : graphContext)}
+            {(string.IsNullOrWhiteSpace(directedContext) ? "" : $"\nINFORMACIÓ ADDICIONAL CERCADA:\n{directedContext}")}
+            """;
+
+                // Generem la resposta amb Groq a partir del context combinat
                 answer = await GenerateAsync(question, fullContext);
-                var judgeRes = await JudgeAsync(question, fullContext, answer);
-                score = judgeRes.Score;
 
-                if (score < minScoreThreshold)
+                // El Judge avalua la resposta i retorna:
+                //   score:           0-100 de qualitat de la resposta
+                //   needsMoreContext: true si la resposta és incompleta per falta d'informació
+                //   missingEntities:  entitats concretes que falten al context per respondre
+                judgeResult = await JudgeAsync(question, fullContext, answer);
+                score = judgeResult.Score;
+                needsMoreContext = judgeResult.NeedsMoreContext;
+
+                Console.ForegroundColor = score >= 80 ? ConsoleColor.Green : ConsoleColor.DarkRed;
+                Console.WriteLine($"└─ [JUDGE] Score {score}/100 — {judgeResult.Reason}");
+
+                // Si el Judge ha identificat entitats específiques que falten,
+                // les mostrem per consola per facilitar el diagnòstic
+                if (judgeResult.MissingEntities.Any())
                 {
-                    Console.WriteLine($"[JUDGE] Score {score}/100: {judgeRes.Reason}. Ampliant context...");
-                    attempts++;
+                    Console.ForegroundColor = ConsoleColor.Magenta;
+                    Console.WriteLine($"   Entitats que falten: [{string.Join(", ", judgeResult.MissingEntities)}]");
                 }
+                Console.ResetColor();
+
+                if (score < 80) attempts++;
             }
 
-            //Si la cerca vectorial + graf no és suficient, oferim el document sencer:
-            if (score < minScoreThreshold)
+            // NIVELL 4 — Document sencer (últim recurs)
+            // Si després de 3 intents amb GraphRAG el Judge no ha aprovat la resposta,
+            // llegim el document sencer des del disc i generem la resposta sense Judge.
+            // Nota: aquest nivell NO passa pel Judge perquè és el màxim context possible.
+            if (score < 80)
             {
-                // 1. Recuperem el text sencer del document
-                string fullDocument = await GetFullDocumentAsync(question);
+                Console.ForegroundColor = ConsoleColor.DarkRed;
+                Console.WriteLine("\n[N4] Cap intent ha superat el llindar — llegint document sencer...");
+                Console.ResetColor();
 
-                // 2. Generem la resposta amb Groq a partir del document sencer
+                string fullDocument = await GetFullDocumentAsync(question);
                 return await GenerateAsync(question, fullDocument);
             }
 
             return answer;
         }
+
+        // Guardem el resultat del Judge entre iteracions del bucle
+        // per poder accedir a MissingEntities al proper intent
+        private JudgeResult? judgeResult;
 
         private async Task<string> GenerateAsync(string q, string c)
         {
@@ -121,12 +178,40 @@ namespace RAG_FITXERS
 
         private async Task<JudgeResult> JudgeAsync(string q, string c, string a)
         {
-            var prompt = $@"Avalua la resposta (0-100) segons el context. Respon en JSON: {{""score"": X, ""reason"": ""...""}}, substitueix X per el valor de score que generes,
-                        CONTEXT: {c} | PREGUNTA: {q} | RESPOSTA: {a}";
+            var prompt = $@"Avalua la resposta (0-100) segons el context proporcionat.
+        Respon NOMÉS en JSON sense cap text addicional:
+        {{
+            ""score"": 80,
+            ""reason"": ""motiu breu"",
+            ""needsMoreContext"": true,
+            ""missingEntities"": [""entitat1"", ""entitat2""]
+        }}
+
+        REGLES:
+        - score: 0-100 segons si la resposta és correcta i completa
+        - needsMoreContext: true si la resposta és incompleta per FALTA d'informació
+                           false si el context és suficient però la resposta és dolenta
+        - missingEntities: llista de noms concrets que FALTEN al context per respondre
+                           ex: [""Carla Valls Rovira"", ""COMP-2024-022""]
+                           buit [] si no falta cap entitat específica
+
+        CONTEXT: {c}
+        PREGUNTA: {q}
+        RESPOSTA: {a}";
 
             var raw = (await _groq.GetChatMessageContentAsync(prompt)).ToString();
-            var cleanJson = raw.Substring(raw.IndexOf("{")); // Per si l'IA xerra de més
-            return JsonSerializer.Deserialize<JudgeResult>(cleanJson, new JsonSerializerOptions { PropertyNameCaseInsensitive = true })!;
+
+            try
+            {
+                var cleanJson = raw.Substring(raw.IndexOf("{"));
+                return JsonSerializer.Deserialize<JudgeResult>(cleanJson,
+                    new JsonSerializerOptions { PropertyNameCaseInsensitive = true })!;
+            }
+            catch
+            {
+                // Si el Judge falla el parse, retornem score baix per forçar reintent
+                return new JudgeResult { Score = 0, Reason = "Error parse Judge", NeedsMoreContext = true };
+            }
         }
 
         /// <summary>
